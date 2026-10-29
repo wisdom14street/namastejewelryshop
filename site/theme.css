@@ -1,0 +1,10 @@
+:root{--ink:#121417;--onink:#f4f4f2;--paper:#f4f4f2;--card:#ffffff;--soft:#e9eaec;--muted:#555a61;--line:#d9dbde;--accent:#c7ccd4;--onaccent:#121417;--accentdark:#3d4652;--focus:#2c5fb3;
+--display:"Cormorant Garamond",Georgia,serif;--body:Jost,system-ui,-apple-system,"Segoe UI",sans-serif;--r:2px;--btnr:0}
+.hero{background:linear-gradient(120deg,#0c0d0f,#22262c 55%,#121417);border-bottom:1px solid #c7ccd4}
+.hero h1{font-weight:600;letter-spacing:.01em}.hero h1 em{font-style:italic;color:#e6e9ee}
+.btn{text-transform:uppercase;letter-spacing:.14em;font-size:13px;font-weight:500}
+.bar{background:#121417;color:#c7ccd4;border-bottom:1px solid #2c3036}
+.card{border:0;border-bottom:1px solid var(--line)}.card .meta h3{font-family:var(--display);font-size:17px;font-weight:600}
+.collage{grid-template-columns:1fr}.collage img{aspect-ratio:4/3;filter:grayscale(.15)}.collage img:nth-child(n+2){display:none}
+.whys li{border-left:0;border-top:2px solid var(--ink)}.scent{border-top:2px solid var(--c)}
+.logo .wordmark{letter-spacing:.12em;text-transform:uppercase;font-size:17px}

@@ -1,0 +1,516 @@
+#!/usr/bin/env python3
+"""Shared static-site engine for the Namaste jewelry and bead storefronts (namastecrystaljewelry.com, namastejewelryshop.com,
+namastejewelrystore.com, namastebeads.com, namastebeadshop.com, namastebeadstore.com). Everything site-specific (name, domain, colors, product mix, copy) lives in ./site/:
+  site/config.json   settings, including REVIEW_URL and GOOGLE_SITE_VERIFICATION
+  site/sitecopy.py   aisles, product mix rules and all page copy
+Usage: python3 scripts/build.py [--preview] [--site=https://example.com]
+"""
+import json, os, re, sys, html, shutil, datetime
+from collections import Counter
+HERE = os.path.dirname(os.path.abspath(__file__)); ROOT = os.path.dirname(HERE)
+sys.path[:0] = [HERE, os.path.join(ROOT, 'site')]
+from catmap import category
+import brands as BR
+import stones as ST
+import sitecopy as C
+
+CFG = json.load(open(os.path.join(ROOT, 'site', 'config.json')))
+DIST = os.path.join(ROOT, 'dist')
+PREVIEW = '--preview' in sys.argv
+SITE = CFG['site_url'].rstrip('/')
+for a in sys.argv:
+    if a.startswith('--site='): SITE = a.split('=', 1)[1].rstrip('/')
+REVIEW_URL = (CFG.get('REVIEW_URL') or '').strip()
+GSV = (CFG.get('GOOGLE_SITE_VERIFICATION') or '').strip()
+BRAND = CFG['brand']; LEGAL = f'{BRAND} is a brand of Wealth Edge Ventures Inc.'
+SHOP = 'https://namastebookshop.com'
+CART_ATTR = '?attributes%5BStorefront%5D=' + CFG['storefront'].replace(' ', '%20')
+E = html.escape
+STORE_STREET = '2 West 14th Street'; STORE_CITY, STORE_REGION, STORE_ZIP = 'New York', 'NY', '10011'
+STORE_ADDR = f'{STORE_STREET}, {STORE_CITY}, {STORE_REGION} {STORE_ZIP}'
+PHONE, TEL = '646-876-1401', '+16468761401'
+GEO = (40.73602, -73.99404)
+HOURS = [('Monday to Thursday', '11 AM to 8 PM'), ('Friday and Saturday', '11 AM to 9 PM'), ('Sunday', '11 AM to 7 PM')]
+HOURS_LD = [(['Monday', 'Tuesday', 'Wednesday', 'Thursday'], '11:00', '20:00'), (['Friday', 'Saturday'], '11:00', '21:00'), (['Sunday'], '11:00', '19:00')]
+MAP_Q = '2+West+14th+Street,+New+York,+NY+10011'
+MAP_EMBED = f'https://www.google.com/maps/embed?origin=mfe&pb=!1m3!2m1!1s{MAP_Q}!6i16'
+MAP_LINK = f'https://www.google.com/maps/search/?api=1&query={MAP_Q}'
+DIRECTIONS = f'https://www.google.com/maps/dir/?api=1&destination={MAP_Q}'
+
+FAMILIES = ST.STONES  # the 'family' of a jewelry piece is its main stone
+FAM_NAME = ST.STONE_NAME
+MULTI = re.compile(r'set of|\bset\b|pack|\bpair\b|\b\d+ ?pcs?\b|lot of', re.I)
+GIFTY = re.compile(r'gift|set\b|kit|bundle|box', re.I)
+
+NOIMG = '/assets/no-photo.svg'
+def img(u, w): return (u if u == NOIMG else f"{u}{'&' if '?' in u else '?'}width={w}") if u else ''
+def srcset(u, ws): return u if u == NOIMG else ', '.join(f'{img(u, w)} {w}w' for w in ws)
+def money(v): return f"${float(v):,.2f}"
+
+# ---------- data ----------
+raw = json.load(open(os.path.join(ROOT, 'data', 'all_products.json')))
+def _load(n, d):
+    p = os.path.join(ROOT, 'data', n)
+    return json.load(open(p)) if os.path.exists(p) else d
+PICKUP = _load('pickup.json', {}); RANK = _load('bestsellers.json', {})
+products = []
+for p in raw:
+    base = category(p)
+    if not base: continue
+    vs = [v for v in p['variants'] if float(v['price']) > 0]
+    avail = [v for v in vs if v['available']]
+    if not avail: continue
+    t = re.sub(r'\s+', ' ', p['title'].strip()); b = BR.brand_of(t, p.get('vendor', ''))
+    sts = ST.stones_of(t) if base != 'meditation' else []
+    x = {'id': p['id'], 'handle': p['handle'], 'title': t, 'base': base, 'brand': b, 'vendor': p.get('vendor', ''),
+         'family': sts[0] if sts else '', 'stones': sts, 'style': ST.style_of(t) if base != 'meditation' else '',
+         'metal': ST.metal_of(t, p.get('product_type', ''), base) if base != 'meditation' else '', 'intents': ST.intents_of(t, sts),
+         'mm': ST.bead_mm(t) if base in ('beaded', 'mala', 'beads') else None, 'size': ST.ring_size(t) if base == 'ring' else '',
+         'body': re.sub(r'\s+', ' ', re.sub(r'<[^>]+>', ' ', p.get('body_html') or '')).strip(),
+         'price': min(float(v['price']) for v in avail), 'images': [i['src'] for i in p['images'][:6]] or [NOIMG], 'noimg': not p.get('images'),
+         'multi': bool(MULTI.search(t)), 'gift': bool(GIFTY.search(t)), 'created': p.get('created_at', ''),
+         'rank': RANK.get(p['handle'], 2.0), 'type': p.get('product_type', '')}
+    cmp_ = [float(v['compare_at_price']) for v in avail if v.get('compare_at_price') and float(v['compare_at_price']) > float(v['price'])]
+    x['compare'] = max(cmp_) if cmp_ else None
+    x['variants'] = [{'id': v['id'], 'title': v['title'], 'price': v['price'], 'available': v['available'], 'sku': v.get('sku') or ''} for v in vs]
+    x['aisle'] = C.assign(x)
+    if not x['aisle']: continue
+    x['pickup'] = next((PICKUP[str(v['id'])] for v in avail if PICKUP.get(str(v['id']), {}).get('available')), None)
+    products.append(x)
+products.sort(key=lambda x: x['created'], reverse=True)
+AISLES = C.AISLES
+AISLE_KEYS = list(AISLES)
+cat_count = Counter(x['aisle'] for x in products)
+AISLE_KEYS = [k for k in AISLE_KEYS if cat_count[k]]
+fam_count = Counter(x['family'] for x in products if x['family'])
+brand_count = Counter(x['brand'] for x in products if x['brand'])
+style_count = Counter(x['style'] for x in products if x['style'])
+metal_count = Counter(x['metal'] for x in products if x['metal'])
+stone_any = Counter(k for x in products for k in x['stones'])
+intent_count = Counter(k for x in products for k in x['intents'])
+kind_count = Counter(x['base'] for x in products)
+PICKUP_ON = sum(1 for x in products if x['pickup']) >= 0.5 * max(1, len(products))
+_ready = [x['pickup']['ready'] for x in products if x['pickup']]
+READY = max(set(_ready), key=_ready.count) if _ready else ''
+HAS_RANK = sum(1 for x in products if x['rank'] < 2) >= 0.3 * len(products)
+
+# group near-identical listings
+parent = {}
+def find(a):
+    while parent.setdefault(a, a) != a: parent[a] = parent[parent[a]]; a = parent[a]
+    return a
+for x in products:
+    h = ('h', x['handle'])
+    parent[find(h)] = find(('t', x['aisle'], re.sub(r'\s+', ' ', x['title'].lower())))
+    if not x['noimg']: parent[find(h)] = find(('i', x['aisle'], x['images'][0].split('?')[0].rsplit('/', 1)[-1]))
+groups = {}
+for x in products: groups.setdefault(find(('h', x['handle'])), []).append(x)
+for g in groups.values():
+    g.sort(key=lambda y: y['price']); same = len({y['title'] for y in g}) == 1
+    for y in g: y['group'] = g; y['label'] = (y['variants'][0]['sku'] or y['title']) if same else y['title']
+leaders, _seen = [], set()
+for x in products:
+    if id(x['group']) not in _seen: _seen.add(id(x['group'])); leaders.append(x['group'][0])
+def by_rank(xs): return sorted(xs, key=lambda x: (x['noimg'], x['rank'], x['price']))
+def photo(xs): return [x for x in xs if not x['noimg']]
+
+class S:  # context handed to sitecopy
+    pass
+for k, v in dict(BRAND=BRAND, LEGAL=LEGAL, SITE=SITE, SHOP=SHOP, STORE_STREET=STORE_STREET, STORE_ADDR=STORE_ADDR, PHONE=PHONE, TEL=TEL,
+                 DIRECTIONS=DIRECTIONS, HOURS=HOURS, PICKUP_ON=PICKUP_ON, READY=READY, N=len(products), money=money, E=E,
+                 cat_count=cat_count, fam_count=fam_count, brand_count=brand_count, style_count=style_count, AISLES=AISLES,
+                 AISLE_KEYS=AISLE_KEYS, FAM_NAME=FAM_NAME, BRAND_NAME=BR.NAME, FACTS=BR.FACTS, products=products, leaders=leaders,
+                 by_rank=by_rank, HAS_RANK=HAS_RANK, metal_count=metal_count, stone_any=stone_any, intent_count=intent_count, kind_count=kind_count,
+                 STONE_NAME=ST.STONE_NAME, INTENT_NAME=ST.INTENT_NAME, INTENTS=ST.INTENTS, NON_STONE=ST.NON_STONE, CFG=CFG).items():
+    setattr(S, k, v)
+S.MIN_PRICE = min(x['price'] for x in products)
+S.MIN_STICK = S.MIN_PRICE
+S.UNDER10 = sum(1 for x in products if x['price'] < 10); S.UNDER20 = sum(1 for x in products if x['price'] < 20); S.UNDER30 = sum(1 for x in products if x['price'] < 30)
+S.SILVER_N = metal_count['Sterling silver']; S.MAX_PRICE = max(x['price'] for x in products)
+S.ABOUT_N = int(round(len(products), -2)) if len(products) >= 150 else (len(products) // 10 * 10 or len(products))
+S.MULTI_N = sum(1 for x in products if x['multi'])
+S.STONE_KEYS = [k for k, n in stone_any.most_common() if n >= C.STONE_MIN]
+S.INTENT_KEYS = [k for k, _, _, _ in ST.INTENTS if intent_count[k] >= C.INTENT_MIN]
+def stone_intents(k): return [n for ik, n, sts, _ in ST.INTENTS if k in sts]
+S.stone_intents = stone_intents
+def kinds_of(xs): return Counter(x['base'] for x in xs)
+S.kinds_of = kinds_of
+
+def match(x, f):
+    if not f: return True
+    if f.get('aisle') and x['aisle'] not in f['aisle']: return False
+    if f.get('base') and x['base'] not in f['base']: return False
+    if f.get('fam') and x['family'] not in f['fam']: return False
+    if f.get('brand') and x['brand'] not in f['brand']: return False
+    if f.get('style') and x['style'] not in f['style']: return False
+    if f.get('stone') and not set(f['stone']) & set(x['stones']): return False
+    if f.get('metal') and x['metal'] not in f['metal']: return False
+    if f.get('intent') and not set(f['intent']) & set(x['intents']): return False
+    if f.get('mmin') is not None and (x['mm'] is None or x['mm'] < f['mmin']): return False
+    if f.get('mmax') is not None and (x['mm'] is None or x['mm'] > f['mmax']): return False
+    if f.get('maxp') is not None and x['price'] >= f['maxp']: return False
+    if f.get('minp') is not None and x['price'] < f['minp']: return False
+    if f.get('multi') and not x['multi']: return False
+    if f.get('gift') and not x['gift']: return False
+    if f.get('q') and not re.search(f['q'], x['title'], re.I): return False
+    if f.get('nq') and re.search(f['nq'], x['title'], re.I): return False
+    return True
+S.match = match
+
+# ---------- html helpers ----------
+def hours_html():
+    return '<dl class="hours">' + ''.join(f'<div><dt>{d}</dt><dd>{h}</dd></div>' for d, h in HOURS) + '</dl>'
+def visit_buttons(light=False):
+    return (f'<div class="cta"><a class="btn" href="{DIRECTIONS}" rel="noopener" target="_blank">Get directions</a>'
+            f'<a class="btn{" ghost" if light else " alt"}" href="tel:{TEL}">Call {PHONE}</a></div>')
+def visit_block(full=False):
+    pk = (f'<p><b>Reserve online, pick up in store.</b> Choose Pickup at checkout; orders are {READY.lower()}.</p>' if PICKUP_ON else
+          f'<p><b>Looking for something specific?</b> Call {PHONE} before you come in.</p>')
+    return f'''<div class="visit"><div class="vinfo"><p class="eyebrow dark">{E(C.VISIT_EYEBROW)}</p><h2>{STORE_STREET}</h2>
+<p class="addr">{STORE_ADDR}<br>On 14th Street just west of Fifth Avenue, about a 4-minute walk from Union Square.</p>
+<h3>Hours</h3>{hours_html()}<p class="small">Holiday hours may differ. Call {PHONE} to check before a special trip.</p>
+{pk}{visit_buttons()}{'' if full else '<p><a href="/visit/">Directions, subway lines and pickup details &rarr;</a></p>'}</div>
+<div class="vmap"><iframe title="Map to {STORE_ADDR}" src="{MAP_EMBED}" loading="lazy" referrerpolicy="no-referrer-when-downgrade" allowfullscreen></iframe></div></div>'''
+S.visit_block = visit_block; S.visit_buttons = visit_buttons; S.hours_html = hours_html
+def store_ld():
+    return {"@context": "https://schema.org", "@type": CFG.get('store_type', 'Store'), "@id": SITE + '/#store', "name": BRAND, "url": SITE + '/',
+            "image": photo(products)[0]['images'][0], "logo": SITE + '/icon-512.png', "description": C.STORE_DESC(S), "telephone": TEL, "priceRange": CFG.get('price_range', '$$'),
+            "address": {"@type": "PostalAddress", "streetAddress": STORE_STREET, "addressLocality": STORE_CITY, "addressRegion": STORE_REGION, "postalCode": STORE_ZIP, "addressCountry": "US"},
+            "geo": {"@type": "GeoCoordinates", "latitude": GEO[0], "longitude": GEO[1]}, "hasMap": MAP_LINK,
+            "openingHoursSpecification": [{"@type": "OpeningHoursSpecification", "dayOfWeek": d, "opens": o, "closes": c} for d, o, c in HOURS_LD],
+            "parentOrganization": {"@type": "Organization", "name": "Wealth Edge Ventures Inc."}}
+def ldjson(o): return f'<script type="application/ld+json">{json.dumps(o)}</script>'
+def faq_ld(qas): return {"@context": "https://schema.org", "@type": "FAQPage", "mainEntity": [{"@type": "Question", "name": re.sub('<[^>]+>', '', q), "acceptedAnswer": {"@type": "Answer", "text": re.sub('<[^>]+>', '', a)}} for q, a in qas]}
+def faq_html(qas): return '<div class="faq">' + ''.join(f'<details><summary>{q}</summary><div>{a}</div></details>' for q, a in qas) + '</div>'
+def crumbs_ld(items): return {"@context": "https://schema.org", "@type": "BreadcrumbList", "itemListElement": [{"@type": "ListItem", "position": i + 1, "name": n, "item": SITE + u} for i, (n, u) in enumerate(items)]}
+def crumbs_html(items): return '<nav class="wrap crumbs" aria-label="Breadcrumb"><ol>' + ''.join(f'<li><a href="{u}">{E(n)}</a></li>' if i < len(items) - 1 else f'<li aria-current="page">{E(n)}</li>' for i, (n, u) in enumerate(items)) + '</ol></nav>'
+
+def review_block():
+    if not REVIEW_URL: return ''
+    import segno
+    q = segno.make(REVIEW_URL, error='m')
+    svg = q.svg_inline(scale=4, dark=CFG['theme']['ink'], light='#ffffff', border=2)
+    return f'''<section class="wrap"><div class="review"><div><h2>{E(C.REVIEW_TITLE)}</h2><p>{E(C.REVIEW_TEXT)}</p>
+<a class="btn" href="{E(REVIEW_URL)}" rel="noopener" target="_blank">Review us on Google</a></div><figure class="qr" aria-label="QR code that opens our Google review page">{svg}<figcaption>Scan to leave a review</figcaption></figure></div></section>'''
+S.review_block = review_block
+
+# ---------- layout ----------
+def logo(): return f'<span class="mark" aria-hidden="true">{C.LOGO_SVG}</span><span class="wordmark">{C.WORDMARK}</span>'
+def nav():
+    links = ''.join(f'<a href="/shop/{AISLES[k][2]}/"><i style="background:{AISLES[k][4]}"></i>{E(AISLES[k][1])}</a>' for k in AISLE_KEYS)
+    return f'''<a class="skip" href="#main">Skip to content</a><header class="top"><div class="bar"><a href="/visit/">{E(C.BAR_TEXT)}</a><span>Open daily from 11 AM</span>{'<span>Reserve online, pick up in store</span>' if PICKUP_ON else ''}</div>
+<div class="nav wrap"><a class="logo" href="/" aria-label="{E(BRAND)} home">{logo()}</a>
+<form class="search" action="/shop/" role="search" autocomplete="off"><label class="sr" for="hq">Search {E(BRAND)}</label><input id="hq" name="q" type="search" placeholder="{E(C.SEARCH_PLACEHOLDER)}" aria-autocomplete="list" aria-controls="sugg" aria-expanded="false"><ul id="sugg" class="sugg" role="listbox" hidden></ul></form>
+<button class="menu" aria-label="Menu" aria-expanded="false" aria-controls="mainnav"><span></span><span></span></button>
+<nav class="links" id="mainnav" aria-label="Main"><a href="/visit/" class="vlink">Visit</a><a href="/shop/">Shop all</a>{links}{'<a href="/stones/">Stones</a>' if S.STONE_KEYS else ''}{'<a href="/intentions/">Intentions</a>' if S.INTENT_KEYS and C.NAV_INTENTS else ''}<a href="/brands/">Brands</a>{f'<a href="/{C.QUIZ["slug"]}/">{E(C.QUIZ["nav"])}</a>' if C.QUIZ else ''}</nav></div></header>'''
+def footer():
+    sib = ''.join(f'<a href="{u}" rel="noopener">{E(n)}</a>' for n, u in CFG.get('siblings', []))
+    expl = ''.join(f'<a href="{u}">{E(n)}</a>' for n, u in C.FOOTER_EXPLORE(S))
+    return f'''<footer class="foot"><div class="wrap grid4">
+<div><a class="logo light" href="/">{logo()}</a><p class="legal">{LEGAL}</p><p class="small">{E(C.FOOT_BLURB)}</p>
+<p class="small">Orders are checked out on Shopify through namastebookshop.com, which processes payment and ships from New York City.</p></div>
+<div><h2 class="fh">Shop</h2>{''.join(f'<a href="/shop/{AISLES[k][2]}/">{E(AISLES[k][0])}</a>' for k in AISLE_KEYS)}<a href="/brands/">Brands A&ndash;Z</a></div>
+<div><h2 class="fh">Explore</h2>{expl}<a href="/faq/">FAQ</a></div>
+<div><h2 class="fh">Visit</h2><p class="small foottxt">{STORE_ADDR}</p>{''.join(f'<p class="small foottxt">{d}: {h}</p>' for d, h in HOURS)}<a href="tel:{TEL}">Call {PHONE}</a><a href="{DIRECTIONS}" rel="noopener" target="_blank">Get directions</a><a href="/visit/">Visit &amp; pickup info</a>
+<h2 class="fh mt">Help</h2><a href="/about/">About us</a><a href="/shipping/">Shipping</a><a href="/returns/">Returns</a><a href="/privacy/">Privacy</a><a href="/terms/">Terms</a>
+{f'<h2 class="fh mt">Our other shops</h2>{sib}' if sib else ''}</div>
+</div><div class="wrap legalline">{LEGAL} &copy; {datetime.date.today().year} Wealth Edge Ventures Inc.</div></footer>'''
+
+SITEMAP = []
+OG_DEFAULT = img(by_rank(photo(leaders))[0]['images'][0], 1200)
+def page(path, title, desc, body, extra_head='', canonical=True, index=True, og_image=None):
+    url = SITE + path; ogi = og_image or OG_DEFAULT
+    robots = '<meta name="robots" content="noindex,nofollow">' if PREVIEW else ''
+    gsv = f'<meta name="google-site-verification" content="{E(GSV)}">' if GSV and path == '/' else ''
+    doc = f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{E(title)}</title><meta name="description" content="{E(desc)}">{robots}{gsv}{f'<link rel="canonical" href="{url}">' if canonical else ''}
+<meta property="og:site_name" content="{E(BRAND)}"><meta property="og:type" content="website"><meta property="og:title" content="{E(title)}"><meta property="og:description" content="{E(desc)}"><meta property="og:url" content="{url}"><meta property="og:image" content="{E(ogi)}">
+<meta name="twitter:card" content="summary_large_image"><meta name="twitter:title" content="{E(title)}"><meta name="twitter:description" content="{E(desc)}"><meta name="twitter:image" content="{E(ogi)}">
+<meta name="theme-color" content="{CFG['theme']['ink']}"><link rel="icon" href="/favicon.svg" type="image/svg+xml"><link rel="icon" href="/icon-192.png" sizes="192x192" type="image/png"><link rel="apple-touch-icon" href="/apple-touch-icon.png"><link rel="manifest" href="/site.webmanifest">
+<link rel="preconnect" href="https://cdn.shopify.com"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="{CFG['theme']['fonts']}" rel="stylesheet">
+<link rel="stylesheet" href="/assets/site.css"><link rel="stylesheet" href="/assets/theme.css">{extra_head}</head>
+<body class="{CFG.get('layout', '')}">{nav()}<main id="main">{body}</main>{footer()}<div class="actionbar"><a href="tel:{TEL}">Call</a><a href="{DIRECTIONS}" rel="noopener" target="_blank">Directions</a><a href="/visit/">Hours</a></div><script src="/assets/site.js" defer></script></body></html>'''
+    out = os.path.join(DIST, path.strip('/'), 'index.html') if path.endswith('/') else os.path.join(DIST, path.strip('/'))
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    open(out, 'w').write(doc)
+    if index and canonical: SITEMAP.append(path)
+
+def tag_of(x): return FAM_NAME.get(x['family']) or AISLES[x['aisle']][1]
+def card(x, eager=False):
+    n = len(x['group'])
+    pre = f'<small>{n} options from</small> ' if n > 1 else (f'<s>{money(x["compare"])}</s> ' if x['compare'] else '')
+    u = x['images'][0]
+    return (f'<a class="card" href="/products/{x["handle"]}/"><div class="ph"><img {"" if eager else "loading=\"lazy\" "}decoding="async" src="{img(u,400)}" srcset="{srcset(u,(300,400,600))}" sizes="(min-width:1050px) 25vw,(min-width:700px) 33vw,50vw" alt="{E(x["title"])}" width="400" height="400"></div>'
+            f'<div class="meta"><span class="tag" style="--c:{AISLES[x["aisle"]][4]}">{E(tag_of(x))}</span><h3>{E(x["title"])}</h3><p class="price">{pre}{money(x["price"])}</p></div></a>')
+S.card = card
+def grid(xs): return f'<div class="grid">{"".join(card(x) for x in xs)}</div>'
+S.grid = grid
+
+# ---------- build ----------
+if os.path.exists(DIST): shutil.rmtree(DIST)
+os.makedirs(os.path.join(DIST, 'data'))
+shutil.copytree(os.path.join(ROOT, 'src', 'assets'), os.path.join(DIST, 'assets'))
+shutil.copy(os.path.join(ROOT, 'site', 'theme.css'), os.path.join(DIST, 'assets', 'theme.css'))
+for f in os.listdir(os.path.join(ROOT, 'src', 'static')): shutil.copy(os.path.join(ROOT, 'src', 'static', f), DIST)
+shutil.copy(os.path.join(ROOT, 'site', 'favicon.svg'), DIST)
+# app icons rendered from the theme colors
+try:
+    from PIL import Image, ImageDraw, ImageFont
+    shape = CFG.get('icon', 'gem')
+    for size, name in ((180, 'apple-touch-icon.png'), (192, 'icon-192.png'), (512, 'icon-512.png')):
+        im = Image.new('RGB', (size, size), CFG['theme']['ink']); d = ImageDraw.Draw(im)
+        s = size / 40; A, P = CFG['theme']['accent'], CFG['theme']['paper']
+        if shape == 'gem':
+            d.polygon([(10*s, 15*s), (15*s, 9*s), (25*s, 9*s), (30*s, 15*s), (20*s, 32*s)], outline=A, width=max(2, int(1.8*s)))
+            d.line([(10*s, 15*s), (30*s, 15*s)], fill=A, width=max(2, int(1.4*s))); d.line([(15*s, 9*s), (20*s, 32*s), (25*s, 9*s)], fill=P, width=max(1, int(1*s)))
+        elif shape == 'ring':
+            d.ellipse([11*s, 14*s, 29*s, 32*s], outline=P, width=max(2, int(2.6*s))); d.polygon([(16*s, 12*s), (20*s, 6*s), (24*s, 12*s), (20*s, 15*s)], fill=A)
+        elif shape == 'tag':
+            d.rounded_rectangle([12*s, 10*s, 30*s, 30*s], radius=int(3*s), outline=P, width=max(2, int(2*s))); d.ellipse([17*s, 14*s, 21*s, 18*s], fill=A)
+            d.line([(14*s, 24*s), (27*s, 24*s)], fill=A, width=max(2, int(2*s)))
+        else:  # beads in a circle
+            import math
+            n = 9 if shape == 'mala' else 7
+            for i in range(n):
+                a_ = 2 * math.pi * i / n - math.pi / 2; cx, cy, r = 20*s + 11*s*math.cos(a_), 19*s + 11*s*math.sin(a_), (2.6 if shape == 'mala' else 3.4)*s
+                d.ellipse([cx-r, cy-r, cx+r, cy+r], fill=A if i % 2 == 0 else P)
+            if shape == 'mala': d.line([(20*s, 30*s), (20*s, 37*s)], fill=A, width=max(2, int(2*s)))
+        im.save(os.path.join(DIST, name))
+except Exception as e:
+    print('icon render skipped:', e)
+json.dump({"name": BRAND, "short_name": CFG.get('short_name', BRAND), "start_url": "/", "display": "standalone", "background_color": CFG['theme']['paper'], "theme_color": CFG['theme']['ink'],
+           "icons": [{"src": "/icon-192.png", "sizes": "192x192", "type": "image/png"}, {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png"}]},
+          open(os.path.join(DIST, 'site.webmanifest'), 'w'))
+
+compact = [{'h': x['handle'], 't': x['title'], 'c': x['aisle'], 'k': x['base'], 'f': x['family'], 'b': x['brand'], 's': x['style'], 'p': x['price'],
+            'mt': x['metal'], 'ss': x['stones'], 'it': x['intents'], 'z': x['mm'],
+            'o': x['compare'] if len(x['group']) == 1 else None, 'n': len(x['group']), 'i': img(x['images'][0], 400), 'm': 1 if x['multi'] else 0,
+            'g': 1 if x['gift'] else 0, 'r': round(min(y['rank'] for y in x['group']), 4), 'd': max(y['created'] for y in x['group'])[:10]} for x in leaders]
+json.dump(compact, open(os.path.join(DIST, 'data', 'catalog.json'), 'w'), separators=(',', ':'))
+json.dump({'aisles': {k: {'name': AISLES[k][0], 'slug': AISLES[k][2], 'color': AISLES[k][4]} for k in AISLE_KEYS}, 'fams': {k: FAM_NAME[k] for k in stone_any},
+           'labels': C.LABELS,
+           'brands': {k: BR.NAME[k] for k in brand_count}, 'built': datetime.datetime.now().isoformat(timespec='minutes')},
+          open(os.path.join(DIST, 'data', 'meta.json'), 'w'))
+
+# ---- home ----
+def collage():
+    picks = [x for x in by_rank(photo(leaders)) if x['base'] in C.HERO_BASES][:4]
+    return '<div class="collage" aria-hidden="true">' + ''.join(f'<img src="{img(x["images"][0],500)}" srcset="{srcset(x["images"][0],(300,500))}" sizes="(min-width:900px) 18vw,40vw" alt="" width="500" height="500"{" fetchpriority=\"high\"" if i==0 else " loading=\"lazy\""}>' for i, x in enumerate(picks)) + '</div>'
+def section(sec):
+    t = sec['type']
+    if t == 'visit': return f'<section class="wrap">{visit_block()}</section>'
+    if t == 'review': return review_block()
+    if t == 'html': return sec['html'](S)
+    if t == 'collections':
+        tiles = ''
+        for it in sec['items']:
+            pool = by_rank(photo([x for x in leaders if match(x, it['filter'])]))
+            if not pool: continue
+            tiles += f'''<a class="coll" href="{it['href']}"><img loading="lazy" src="{img(pool[0]['images'][0],500)}" srcset="{srcset(pool[0]['images'][0],(300,500))}" sizes="(min-width:900px) 30vw,50vw" alt="" width="500" height="500"><div><h3>{E(it['title'])}</h3><p>{E(it['blurb'])}</p><span>{sum(1 for x in products if match(x, it['filter']))} items &rarr;</span></div></a>'''
+        return f'<section class="wrap"><div class="sechead"><h2>{E(sec["title"])}</h2></div><div class="colls">{tiles}</div></section>'
+    if t == 'grid':
+        xs = sec['select'](S)
+        if not xs: return ''
+        return f'<section class="wrap"><div class="sechead"><h2>{E(sec["title"])}</h2>{f"<a href=\"{sec["href"]}\">{E(sec["link"])} &rarr;</a>" if sec.get("href") else ""}</div>{f"<p class=\"intro\">{sec["intro"]}</p>" if sec.get("intro") else ""}{grid(xs)}</section>'
+    if t == 'brands':
+        chips = ''.join(f'<a class="chip" href="/brands/{k}/">{E(BR.NAME[k])} <small>{n}</small></a>' for k, n in brand_count.most_common(sec.get('n', 12)))
+        return f'<section class="wrap"><div class="sechead"><h2>{E(sec["title"])}</h2><a href="/brands/">Brands A&ndash;Z &rarr;</a></div><div class="chips">{chips}</div></section>'
+    if t == 'whys':
+        return f'<section class="wrap"><div class="sechead"><h2>{E(sec["title"])}</h2></div><ul class="whys">' + ''.join(f'<li><b>{a}</b><span>{b}</span></li>' for a, b in sec['items'](S) if a) + '</ul></section>'
+    if t == 'quiz' and C.QUIZ:
+        return f'<section class="wrap"><div class="quizcta"><div><h2>{E(sec["title"])}</h2><p>{E(sec["text"])}</p></div><a class="btn" href="/{C.QUIZ["slug"]}/">{E(C.QUIZ["cta"])}</a></div></section>'
+    if t == 'band':
+        steps = ''.join(f'<li><b>{a}</b><span>{b}</span></li>' for a, b in sec['steps'](S))
+        return f'<section class="band"><div class="wrap band-in"><div><h2>{E(sec["title"])}</h2><p>{sec["text"](S)}</p>{visit_buttons(True)}</div><ol class="steps">{steps}</ol></div></section>'
+    return ''
+H = C.HERO(S)
+home = f'''<section class="hero"><div class="wrap hero-in"><div class="htext"><p class="eyebrow">{H['eyebrow']}</p><h1>{H['h1']}</h1><p class="lede">{H['lede']}</p>
+<div class="cta"><a class="btn" href="{DIRECTIONS}" rel="noopener" target="_blank">Get directions</a><a class="btn ghost" href="tel:{TEL}">Call {PHONE}</a><a class="btn ghost" href="/shop/">{E(H.get('shop_cta','Shop online'))}</a></div></div>{collage()}</div></section>
+{''.join(section(s) for s in C.HOME_SECTIONS)}'''
+page('/', C.HOME_TITLE(S), C.HOME_DESC(S), home, ldjson({"@context": "https://schema.org", "@type": "WebSite", "name": BRAND, "url": SITE + '/',
+     "potentialAction": {"@type": "SearchAction", "target": SITE + "/shop/?q={search_term_string}", "query-input": "required name=search_term_string"}}) + ldjson(store_ld()))
+
+# ---- shop pages ----
+def shop_page(path, title, desc, h1, sub, preset=None, intro='', crumbs=None, extra_html='', extra_ld=''):
+    preset = preset or {}
+    chips = '<button class="f on" data-cat="">All</button>' + ''.join(f'<button class="f" data-cat="{k}" style="--c:{AISLES[k][4]}">{E(AISLES[k][1])} <small>{cat_count[k]}</small></button>' for k in AISLE_KEYS)
+    fams = '<option value="">All stones</option>' + ''.join(f'<option value="{k}">{E(FAM_NAME[k])}</option>' for k in sorted(fam_count, key=lambda k: FAM_NAME[k]))
+    metals = '<option value="">Any metal</option>' + ''.join(f'<option>{E(m)}</option>' for m in ST.METALS if metal_count[m])
+    brands = '<option value="">All brands</option>' + ''.join(f'<option value="{k}">{E(BR.NAME[k])}</option>' for k in sorted(brand_count, key=lambda k: BR.NAME[k].lower()))
+    styles = '<option value="">All styles</option>' + ''.join(f'<option>{E(s)}</option>' for s in sorted(style_count))
+    pool = [x for x in leaders if match(x, preset)]
+    pool = (by_rank(pool) if HAS_RANK else pool)[:48]
+    body = f'''{crumbs_html(crumbs) if crumbs else ''}<section class="wrap shophead"><h1>{E(h1)}</h1><p>{E(sub)}</p>{intro}</section>
+<section class="wrap shop" data-preset='{E(json.dumps(preset))}'>
+<div class="filters"><div class="fcats" role="group" aria-label="Aisles">{chips}</div><div class="frow"><label class="sr" for="q">Search</label><input type="search" id="q" placeholder="{E(C.SEARCH_PLACEHOLDER)}">
+<label class="sr" for="fam">Stone</label><select id="fam">{fams}</select><label class="sr" for="mt">Metal</label><select id="mt">{metals}</select><label class="sr" for="sty">Style</label><select id="sty">{styles}</select><label class="sr" for="brand">Brand</label><select id="brand">{brands}</select>
+<label class="sr" for="price">Price</label><select id="price"><option value="">Any price</option>{''.join(f'<option value="{v}">{E(l)}</option>' for v, l in C.PRICE_BANDS)}</select>
+<label class="sr" for="sort">Sort</label><select id="sort">{'<option value="best">Best selling</option>' if HAS_RANK else ''}<option value="new">Newest</option><option value="lo">Price: low to high</option><option value="hi">Price: high to low</option><option value="az">A to Z</option></select></div>
+<p class="count" id="count" aria-live="polite"></p></div><div class="grid" id="grid">{''.join(card(x) for x in pool)}</div><div class="more"><button class="btn" id="more" hidden>Show more</button></div></section>{extra_html}'''
+    page(path, title, desc, body, (ldjson(crumbs_ld(crumbs)) if crumbs else '') + extra_ld)
+S.shop_page = shop_page
+shop_page('/shop/', C.SHOP_TITLE(S), C.SHOP_DESC(S), C.SHOP_H1, C.SHOP_SUB(S), crumbs=[('Home', '/'), ('Shop', '/shop/')])
+for k in AISLE_KEYS:
+    a = AISLES[k]
+    shop_page(f'/shop/{a[2]}/', C.AISLE_TITLE(S, k), C.AISLE_DESC(S, k), a[0], a[3], {'aisle': [k]}, crumbs=[('Home', '/'), ('Shop', '/shop/'), (a[0], f'/shop/{a[2]}/')])
+for L in C.LANDINGS(S):
+    if any(match(x, L['filter']) for x in products):
+        shop_page(L['path'], L['title'], L['desc'], L['h1'], L['sub'], L['filter'], L.get('intro', ''), crumbs=[('Home', '/'), (L['h1'], L['path'])])
+
+# ---- stone and intention pages ----
+for k in S.STONE_KEYS:
+    P = C.STONE_PAGE(S, k, [x for x in products if k in x['stones']])
+    qas = P.get('faq', [])
+    shop_page(f'/stones/{k}/', P['title'], P['desc'], P['h1'], P['sub'], {'stone': [k]}, P.get('intro', ''), crumbs=[('Home', '/'), ('Stones', '/stones/'), (FAM_NAME[k], f'/stones/{k}/')],
+              extra_html=(f'<section class="wrap prose"><h2>{E(P.get("faq_title", "Questions"))}</h2>{faq_html(qas)}</section>' if qas else ''), extra_ld=ldjson(faq_ld(qas)) if qas else '')
+for k in S.INTENT_KEYS:
+    P = C.INTENT_PAGE(S, k, [x for x in products if k in x['intents']])
+    qas = P.get('faq', [])
+    shop_page(f'/intentions/{k}/', P['title'], P['desc'], P['h1'], P['sub'], {'intent': [k]}, P.get('intro', ''), crumbs=[('Home', '/'), ('Intentions', '/intentions/'), (ST.INTENT_NAME[k], f'/intentions/{k}/')],
+              extra_html=(f'<section class="wrap prose"><h2>{E(P.get("faq_title", "Questions"))}</h2>{faq_html(qas)}</section>' if qas else ''), extra_ld=ldjson(faq_ld(qas)) if qas else '')
+def _hub(path, name, h1, lead, tiles, title, desc):
+    cr = [('Home', '/'), (name, path)]
+    page(path, title, desc, f'{crumbs_html(cr)}<section class="wrap"><div class="prose"><h1>{E(h1)}</h1><p class="lead">{lead}</p></div><div class="scents">{tiles}</div></section>', ldjson(crumbs_ld(cr)))
+if S.STONE_KEYS:
+    H_ = C.STONES_HUB(S)
+    tiles = ''.join(f'<a class="scent" href="/stones/{k}/" style="--c:{C.stone_color(k)}"><b>{E(FAM_NAME[k])}</b><span>{E(C.stone_tile(S, k))}</span><small>{stone_any[k]} pieces</small></a>' for k in sorted(S.STONE_KEYS, key=lambda k: FAM_NAME[k]))
+    _hub('/stones/', 'Stones', H_['h1'], H_['lead'], tiles, H_['title'], H_['desc'])
+if S.INTENT_KEYS:
+    H_ = C.INTENTS_HUB(S)
+    tiles = ''.join(f'<a class="scent" href="/intentions/{k}/" style="--c:{C.intent_color(k)}"><b>{E(ST.INTENT_NAME[k])}</b><span>{E(C.intent_tile(S, k))}</span><small>{intent_count[k]} pieces</small></a>' for k in S.INTENT_KEYS)
+    _hub('/intentions/', 'Intentions', H_['h1'], H_['lead'], tiles, H_['title'], H_['desc'])
+
+# ---- brand pages ----
+def brand_stats(k):
+    xs = [x for x in products if x['brand'] == k]
+    return {'n': len(xs), 'min': min(x['price'] for x in xs), 'max': max(x['price'] for x in xs), 'xs': xs,
+            'aisles': Counter(x['aisle'] for x in xs), 'pickup': sum(1 for x in xs if x['pickup']), 'fams': Counter(x['family'] for x in xs if x['family'])}
+dir_items = []
+for k in sorted(brand_count, key=lambda k: BR.NAME[k].lower()):
+    st = brand_stats(k); name = BR.NAME[k]; rich = st['n'] >= 5
+    lead = [x for x in leaders if x['brand'] == k]
+    intro = C.brand_intro(S, k, st)
+    qas = C.brand_faq(S, k, st)
+    parts = [f'<div class="bintro">{intro}</div>',
+             '<ul class="bstats">' + f'<li><b>{st["n"]}</b> in stock</li><li><b>{money(st["min"])}</b>{" to " + money(st["max"]) if st["max"] > st["min"] else ""}</li>' + ''.join(f'<li><b>{c}</b> {E(AISLES[a][0])}</li>' for a, c in st['aisles'].most_common(3)) + '</ul>']
+    if rich:
+        top = by_rank(lead)[:4] if HAS_RANK else lead[:4]
+        parts.append(f'<h2>{"Best sellers" if HAS_RANK else "Popular picks"}</h2>{grid(top)}')
+        bands = C.BRAND_BANDS
+        filled = [(label, [x for x in (by_rank(lead) if HAS_RANK else lead) if lo <= x['price'] < hi][:4]) for label, lo, hi in bands]
+        filled = [(l, b) for l, b in filled if b]
+        if len(filled) > 1:
+            parts.append('<h2>By price</h2>' + ''.join(f'<h3 class="pband">{l}</h3>{grid(b)}' for l, b in filled))
+    parts.append(f'<h2>All {E(name)} ({len(lead)})</h2>{grid(by_rank(lead) if HAS_RANK else lead)}')
+    if qas: parts.append(f'<h2>{E(name)} questions</h2>{faq_html(qas)}')
+    cr = [('Home', '/'), ('Brands', '/brands/'), (name, f'/brands/{k}/')]
+    body = f'{crumbs_html(cr)}<section class="wrap brandpage"><h1>{E(C.BRAND_H1(S, k))}</h1>{"".join(parts)}<p class="legal">{LEGAL}</p></section>'
+    page(f'/brands/{k}/', C.BRAND_TITLE(S, k, st), C.BRAND_DESC(S, k, st), body,
+         ldjson(crumbs_ld(cr)) + (ldjson(faq_ld(qas)) if qas else '') + ldjson({"@context": "https://schema.org", "@type": "CollectionPage", "name": C.BRAND_H1(S, k), "url": f"{SITE}/brands/{k}/", "about": {"@type": "Brand", "name": name}}),
+         og_image=img(by_rank(lead)[0]['images'][0], 1200) if not by_rank(lead)[0]['noimg'] else None)
+    dir_items.append((name, k, st['n']))
+letters = {}
+for name, k, n in dir_items: letters.setdefault(name[0].upper() if name[0].isalpha() else '#', []).append((name, k, n))
+az = '<nav class="az" aria-label="Jump to letter">' + ''.join(f'<a href="#l-{L}">{L}</a>' for L in sorted(letters)) + '</nav>' + ''.join(
+    f'<h2 id="l-{L}">{L}</h2><ul class="dir">' + ''.join(f'<li><a href="/brands/{k}/">{E(nm)}</a> <span class="small">{n} item{"s" if n != 1 else ""}</span></li>' for nm, k, n in items) + '</ul>' for L, items in sorted(letters.items()))
+page('/brands/', C.BRANDS_TITLE(S), C.BRANDS_DESC(S), f'{crumbs_html([("Home", "/"), ("Brands", "/brands/")])}<section class="wrap prose"><h1>{E(C.BRANDS_H1)}</h1><p class="lead">{C.BRANDS_LEAD(S, len(dir_items))}</p>{az}</section>',
+     ldjson(crumbs_ld([("Home", "/"), ("Brands", "/brands/")])))
+
+# ---- product pages ----
+for x in products:
+    a = AISLES[x['aisle']]
+    avail = [v for v in x['variants'] if v['available']]; v0 = avail[0]
+    imgs = x['images']
+    gallery = ''.join(f'<button class="th{" on" if i==0 else ""}" data-src="{img(u,1200)}" aria-label="Show photo {i+1}"><img loading="lazy" src="{img(u,160)}" alt="" width="80" height="80"></button>' for i, u in enumerate(imgs))
+    opts = ''
+    if len(x['variants']) > 1:
+        opts = f'<label class="vlab">{"Size or option" if x["base"] == "ring" else "Option"}<select id="variant" aria-label="{"Choose a size or option" if x["base"] == "ring" else "Choose an option"}">' + ''.join(f'<option value="{v["id"]}"{" disabled" if not v["available"] else ""}{" selected" if v is v0 else ""}>{E(v["title"])}{"" if v["available"] else " (sold out)"}</option>' for v in x['variants']) + '</select></label>'
+    facts = [('Aisle', f'<a href="/shop/{a[2]}/">{E(a[0])}</a>')]
+    if x['stones']: facts.append(('Stone' if len(x['stones']) == 1 else 'Stones', ', '.join(f'<a href="/stones/{k}/">{E(FAM_NAME[k])}</a>' if stone_any[k] >= C.STONE_MIN else E(FAM_NAME[k]) for k in x['stones'][:4])))
+    if x['metal']: facts.append(('Metal' if x['metal'] not in ('Cord, elastic & leather',) else 'Strung on', E(x['metal'])))
+    if x['mm']: facts.append(('Bead size', f"{x['mm']:g} mm"))
+    if x['size']: facts.append(('Ring size', E(x['size'])))
+    if x['brand']: facts.append(('Brand', f'<a href="/brands/{x["brand"]}/">{E(BR.NAME[x["brand"]])}</a>'))
+    if x['style']: facts.append(('Style', E(x['style'])))
+    if v0['sku']: facts.append(('SKU', E(v0['sku'])))
+    facts.append(('Ships from', 'New York City'))
+    if x['pickup']: facts.append(('Pickup', f'<a href="/visit/">{STORE_STREET}</a>'))
+    def rel(pred, n=4, exclude=()):
+        pool = [y for y in leaders if y['group'] is not x['group'] and y not in exclude and pred(y)]
+        return (by_rank(pool) if HAS_RANK else pool)[:n]
+    same_brand = rel(lambda y: x['brand'] and y['brand'] == x['brand'])
+    same_scent = rel(lambda y: x['family'] and y['family'] == x['family'] and y['base'] != x['base'], exclude=same_brand) or rel(lambda y: x['family'] and y['family'] == x['family'], exclude=same_brand)
+    pair_bases = C.PAIR.get(x['base'], [])
+    pair = rel(lambda y: y['base'] in pair_bases)
+    more = rel(lambda y: y['aisle'] == x['aisle'], exclude=same_brand + same_scent)
+    sibs = ''
+    if len(x['group']) > 1:
+        sibs = '<div class="sibs"><h2>Choose yours</h2><p class="small">Each option is a separate listing with its own price.</p>' + ''.join(
+            f'<a class="sib{" on" if y is x else ""}" href="/products/{y["handle"]}/"{" aria-current=\"page\"" if y is x else ""}><img loading="lazy" src="{img(y["images"][0],120)}" alt="" width="60" height="60"><span>{E(y["label"])}</span><b>{money(y["price"])}</b></a>' for y in x['group']) + '</div>'
+    desc = C.describe(S, x)
+    cr = [('Home', '/'), ('Shop', '/shop/'), (a[0], f'/shop/{a[2]}/'), (x['title'], f"/products/{x['handle']}/")]
+    ld = {"@context": "https://schema.org", "@type": "Product", "name": x['title'], "image": [SITE + u if u == NOIMG else img(u, 1200) for u in imgs[:3]], "sku": v0['sku'] or str(v0['id']),
+          "brand": {"@type": "Brand", "name": BR.NAME.get(x['brand'], BRAND)}, "category": a[0], "url": f"{SITE}/products/{x['handle']}/",
+          "description": re.sub('<[^>]+>', '', ' '.join(desc)),
+          "offers": {"@type": "Offer", "price": f"{float(v0['price']):.2f}", "priceCurrency": "USD", "availability": "https://schema.org/InStock", "itemCondition": "https://schema.org/NewCondition",
+                     "url": f"{SITE}/products/{x['handle']}/", "seller": {"@type": "Organization", "name": "Wealth Edge Ventures Inc."},
+                     **({"availableAtOrFrom": {"@id": SITE + '/#store'}} if x['pickup'] else {})}}
+    cmp_ = f'<s id="cmp">{money(x["compare"])}</s>' if x['compare'] else '<s id="cmp" hidden></s>'
+    btns = f'<div class="pbtns"><a href="{DIRECTIONS}" rel="noopener" target="_blank">Directions</a><a href="tel:{TEL}">Call</a><a href="/visit/">Hours</a></div>'
+    pk = (f'<div class="pickup"><h2>Reserve online, pick up in store</h2><p>Pickup available at <b>{STORE_ADDR}</b>, steps from Union Square. {E(x["pickup"]["ready"])}.</p><p class="small">Tap Buy now, then choose <b>Pickup</b> at checkout. Questions? Call <a href="tel:{TEL}">{PHONE}</a>.</p>{btns}</div>'
+          if x['pickup'] else f'<div class="pickup"><h2>See it in person</h2><p>Visit us at <b>{STORE_ADDR}</b>, steps from Union Square. Call <a href="tel:{TEL}">{PHONE}</a> before you come to check it is in stock.</p>{btns}</div>')
+    rows = ''
+    for title, xs in ((C.REL_SCENT.format(scent=FAM_NAME.get(x['family'], '')), same_scent), (C.REL_PAIR, pair), (C.REL_BRAND.format(brand=BR.NAME.get(x['brand'], '')), same_brand), (C.REL_MORE.format(aisle=a[0].lower()), more)):
+        if xs: rows += f'<section class="wrap"><div class="sechead"><h2>{E(title)}</h2></div>{grid(xs)}</section>'
+    body = f'''{crumbs_html(cr)}<section class="wrap pdp" data-handle="{x['handle']}"><div class="gallery"><div class="main"><img id="mainimg" src="{img(imgs[0],1200)}" srcset="{srcset(imgs[0],(600,900,1200))}" sizes="(min-width:900px) 55vw,100vw" alt="{E(x['title'])}" width="1200" height="1200" fetchpriority="high"></div>{f'<div class="thumbs">{gallery}</div>' if len(imgs)>1 else ''}</div>
+<div class="info"><span class="tag" style="--c:{a[4]}">{E(a[0])}</span><h1>{E(x['title'])}</h1><p class="pprice">{cmp_} <span id="price">{money(v0['price'])}</span></p><p class="stock" id="stock"><i></i><span>In stock</span></p>{opts}{sibs}
+<a class="btn buy" id="buy" href="{SHOP}/cart/{v0['id']}:1{CART_ATTR}" rel="nofollow">Buy now</a>
+<p class="note">Checkout opens on Shopify (namastebookshop.com), where you can choose shipping{" or in-store pickup" if x['pickup'] else ""} and review your order before paying.</p>
+{pk}<div class="desc">{''.join(f'<p>{s}</p>' for s in desc)}</div><dl class="facts">{''.join(f'<div><dt>{p}</dt><dd>{q}</dd></div>' for p, q in facts)}</dl><p class="small"><a href="/shipping/">Shipping</a> &middot; <a href="/returns/">Returns</a></p></div></section>{rows}'''
+    page(f"/products/{x['handle']}/", f"{x['title']} | {BRAND}", C.PRODUCT_DESC(S, x, v0), body,
+         ldjson(ld) + ldjson(crumbs_ld(cr)) + f'<script>window.NI_PRODUCT={json.dumps({"handle": x["handle"], "cartAttr": CART_ATTR, "shop": SHOP})}</script>', og_image=None if x['noimg'] else img(imgs[0], 1200))
+
+# ---- info pages ----
+def info(path, title, desc, h1, body_html, extra_head='', crumbs=True):
+    cr = [('Home', '/'), (h1, path)]
+    page(path, f'{title} | {BRAND}', desc, f'{crumbs_html(cr) if crumbs else ""}<section class="wrap prose"><h1>{h1}</h1>{body_html}<p class="legal">{LEGAL}</p></section>', (ldjson(crumbs_ld(cr)) if crumbs else '') + extra_head)
+S.info = info; S.ldjson = ldjson; S.store_ld = store_ld; S.faq_html = faq_html; S.faq_ld = faq_ld
+info('/about/', 'About', C.ABOUT_DESC(S), C.ABOUT_H1, C.ABOUT(S), ldjson(store_ld()))
+TRANSIT = '''<ul class="transit"><li><b>14 St&ndash;Union Square</b> <span class="lines">4 5 6 L N Q R W</span><br>About 0.2 miles east, roughly a 4-minute walk west along 14th Street.</li>
+<li><b>14 St/6 Av</b> <span class="lines">F M L</span>, connected to <b>14 St</b> <span class="lines">1 2 3</span><br>About 0.2 miles west at Sixth Avenue, roughly a 4-minute walk east along 14th Street.</li>
+<li><b>PATH</b> 14th Street station at Sixth Avenue.</li><li><b>Bus</b> M14A and M14D Select Bus Service run along 14th Street.</li></ul>
+<p class="small">Some lines run only at certain times (for example, the W runs weekdays and the M weekdays during the day). Check the MTA before you travel.</p>'''
+S.TRANSIT = TRANSIT
+info('/visit/', C.VISIT_TITLE, C.VISIT_DESC(S), 'Visit us at 2 West 14th Street', f'''<p class="lead">{C.VISIT_LEAD(S)}</p>{visit_block(full=True)}<h2>Getting here</h2>{TRANSIT}
+<h2>{"Reserve online, pick up in store" if PICKUP_ON else "Looking for something specific?"}</h2>
+{f"<ol><li>Find what you want in the <a href='/shop/'>online shop</a>.</li><li>Tap Buy now and choose <b>Pickup</b> at checkout.</li><li>Orders are {READY.lower()}. Come to {STORE_ADDR} during open hours.</li></ol><p>Questions about a pickup? Call <a href='tel:{TEL}'>{PHONE}</a>.</p>" if PICKUP_ON else f"<p>Call <a href='tel:{TEL}'>{PHONE}</a> before you come in.</p>"}{review_block()}''', ldjson(store_ld()))
+for g in C.HOODS(S):
+    info(g['path'], g['title'], g['desc'], g['h1'], g['html'], ldjson(store_ld()))
+faqs = C.FAQ(S)
+info('/faq/', 'Frequently Asked Questions', C.FAQ_DESC(S), C.FAQ_H1, faq_html(faqs), ldjson(faq_ld(faqs)))
+for g in C.GUIDES(S):
+    info(g['path'], g['title'], g['desc'], g['h1'], g['html'], ldjson(store_ld()) if g.get('store_ld') else '')
+if C.QUIZ:
+    Q = C.QUIZ
+    qhtml = ''.join(f'<fieldset class="qq"><legend>{i+1}. {E(q["q"])}</legend>' + ''.join(f'<label><input type="radio" name="q{i}" value="{j}"{" required" if j==0 else ""}> {E(o["label"])}</label>' for j, o in enumerate(q['options'])) + '</fieldset>' for i, q in enumerate(Q['questions']))
+    info(f'/{Q["slug"]}/', Q['title'], Q['desc'], Q['h1'], f'''<p class="lead">{Q['lead']}</p><form id="quiz" class="quiz">{qhtml}<button class="btn" type="submit">{E(Q['submit'])}</button></form>
+<div id="quizout" aria-live="polite"></div><script>window.NI_QUIZ={json.dumps([[o['filter'] for o in q['options']] for q in Q['questions']])}</script>''')
+def policy(path, title, slug, intro):
+    info(path, title, f'{title} for {BRAND} orders.', title, f'<p class="lead">{intro}</p><p>Because checkout and fulfillment run through our Shopify store, the full and current {title.lower()} is published there:</p><p><a class="btn" href="{SHOP}/policies/{slug}">Read the full {title.lower()}</a></p>')
+policy('/shipping/', 'Shipping Policy', 'shipping-policy', f'Orders ship from New York City. Shipping options and costs are shown at checkout before you pay.{" You can also choose Pickup at checkout and collect your order at " + STORE_ADDR + "." if PICKUP_ON else ""}')
+policy('/returns/', 'Refund Policy', 'refund-policy', 'If something is not right with your order, the refund policy below explains eligibility, timing and how to start a return.')
+policy('/privacy/', 'Privacy Policy', 'privacy-policy', 'This site does not use accounts or collect payment details; checkout and payment are handled by Shopify. The privacy policy below covers the data collected at checkout.')
+policy('/terms/', 'Terms of Service', 'terms-of-service', 'Purchases made through this site are completed on Shopify and governed by the terms below.')
+page('/404.html', f'Page not found | {BRAND}', 'Page not found', f'<section class="wrap prose"><h1>{E(C.NOT_FOUND)}</h1><p>The page you were looking for may have sold out or moved.</p><p><a class="btn" href="/shop/">Back to the shop</a></p></section>', canonical=False, index=False)
+
+# ---- sitemap / robots / CNAME ----
+open(os.path.join(DIST, '.nojekyll'), 'w').write('')
+if SITE.startswith('https://') and 'github.io' not in SITE: open(os.path.join(DIST, 'CNAME'), 'w').write(SITE.split('://', 1)[1] + '\n')
+today = datetime.date.today().isoformat()
+open(os.path.join(DIST, 'sitemap.xml'), 'w').write('<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">' + ''.join(f'<url><loc>{SITE}{u}</loc><lastmod>{today}</lastmod></url>' for u in SITEMAP) + '</urlset>')
+open(os.path.join(DIST, 'robots.txt'), 'w').write('User-agent: *\nDisallow: /\n' if PREVIEW else f'User-agent: *\nAllow: /\nSitemap: {SITE}/sitemap.xml\n')
+summary = {'site': SITE, 'count': len(products), 'cards': len(leaders), 'aisles': {AISLES[k][0]: cat_count[k] for k in AISLE_KEYS}, 'brands': {BR.NAME[k]: n for k, n in brand_count.most_common()},
+           'brand_pages': len(dir_items), 'pages': len(SITEMAP), 'pickup_on': PICKUP_ON, 'ready': READY, 'ranked': HAS_RANK, 'min_stick': S.MIN_STICK, 'under10': S.UNDER10,
+           'review_url_set': bool(REVIEW_URL), 'gsc_set': bool(GSV)}
+json.dump(summary, open(os.path.join(ROOT, 'data', 'summary.json'), 'w'), indent=1)
+print(json.dumps({k: v for k, v in summary.items() if k != 'brands'}))

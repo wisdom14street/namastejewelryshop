@@ -1,0 +1,17 @@
+{
+  "brand": "Namaste Jewelry Shop",
+  "short_name": "Jewelry Shop",
+  "site_url": "https://namastejewelryshop.com",
+  "storefront": "Namaste Jewelry Shop",
+  "REVIEW_URL": "",
+  "GOOGLE_SITE_VERIFICATION": "",
+  "store_type": "JewelryStore",
+  "price_range": "$$$",
+  "icon": "ring",
+  "layout": "l-silver",
+  "kinds": ["pendant", "necklace", "chain", "ring", "bracelet", "earrings", "anklet", "mala", "beaded"],
+  "best_collections": ["925-silver-rings", "925-sterling-silver-pendants", "925-silver-earrings", "925-silver-necklace", "925-silver-chain"],
+  "siblings": [["Namaste Crystal Jewelry: every stone, every style", "https://namastecrystaljewelry.com/"], ["Namaste Jewelry Store: gifts under $30", "https://namastejewelrystore.com/"], ["Namaste Bead Shop: malas & prayer beads", "https://namastebeadshop.com/"], ["Manhattan Crystal Market", "https://manhattancrystalmarket.com/"]],
+  "theme": {"ink": "#121417", "paper": "#f4f4f2", "accent": "#c7ccd4",
+            "fonts": "https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600;700&family=Jost:wght@400;500;600&display=swap"}
+}
