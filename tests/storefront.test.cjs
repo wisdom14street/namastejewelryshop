@@ -66,3 +66,19 @@ test('hidden pagination selector overrides generic button display', () => {
   assert.match(css,/\.btn\{display:inline-flex/);
   assert.match(css,/#more\[hidden\]\{display:none\}/);
 });
+
+test('search suggests only gemstone landing pages present in the build', async () => {
+  let scheduled;
+  const hq={value:'Angelite',setAttribute(){} ,addEventListener(){}},sg={innerHTML:'',hidden:true};
+  const meta={fams:{angelite:'Angelite',amethyst:'Amethyst'},stone_pages:{amethyst:'Amethyst'},brands:{}};
+  vm.runInNewContext(source, {
+    document:{querySelector:s=>({'#hq':hq,'#sugg':sg}[s]||null),querySelectorAll:()=>[],addEventListener(){}},
+    window:{},fetch:url=>Promise.resolve({json:async()=>url.includes('catalog')?[]:meta}),
+    setTimeout:cb=>{scheduled=cb;},clearTimeout(){}
+  });
+  hq.oninput();await scheduled();
+  assert.doesNotMatch(sg.innerHTML,/\/stones\/angelite\//);
+  assert.match(sg.innerHTML,/\/shop\/\?q=Angelite/);
+  hq.value='Amethyst';hq.oninput();await scheduled();
+  assert.match(sg.innerHTML,/\/stones\/amethyst\//);
+});

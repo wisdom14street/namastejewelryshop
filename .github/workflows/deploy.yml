@@ -25,6 +25,13 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install segno pillow
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Verify storefront, checkout markers and offline builds
+        run: |
+          node --test tests/*.test.cjs
+          python3 -m unittest discover -s tests -p '*_test.py'
       - name: Fetch catalog, pickup, best sellers; build namastejewelryshop.com
         run: |
           mkdir -p data
