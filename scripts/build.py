@@ -200,8 +200,9 @@ def visit_block(full=False):
 <div class="vmap"><iframe title="Map to {STORE_ADDR}" src="{MAP_EMBED}" loading="lazy" referrerpolicy="no-referrer-when-downgrade" allowfullscreen></iframe></div></div>'''
 S.visit_block = visit_block; S.visit_buttons = visit_buttons; S.hours_html = hours_html
 def store_ld():
+    photos = photo(products)
     return {"@context": "https://schema.org", "@type": CFG.get('store_type', 'Store'), "@id": SITE + '/#store', "name": BRAND, "url": SITE + '/',
-            "image": photo(products)[0]['images'][0], "logo": SITE + '/icon-512.png', "description": C.STORE_DESC(S), "telephone": TEL, "priceRange": CFG.get('price_range', '$$'),
+            "image": photos[0]['images'][0] if photos else SITE + '/og.jpg', "logo": SITE + '/icon-512.png', "description": C.STORE_DESC(S), "telephone": TEL, "priceRange": CFG.get('price_range', '$$'),
             "address": {"@type": "PostalAddress", "streetAddress": STORE_STREET, "addressLocality": STORE_CITY, "addressRegion": STORE_REGION, "postalCode": STORE_ZIP, "addressCountry": "US"},
             "geo": {"@type": "GeoCoordinates", "latitude": GEO[0], "longitude": GEO[1]}, "hasMap": MAP_LINK,
             "openingHoursSpecification": [{"@type": "OpeningHoursSpecification", "dayOfWeek": d, "opens": o, "closes": c} for d, o, c in HOURS_LD],
@@ -236,7 +237,7 @@ def footer():
     expl = ''.join(f'<a href="{u}">{E(n)}</a>' for n, u in C.FOOTER_EXPLORE(S))
     return f'''<footer class="foot"><div class="wrap grid4">
 <div><a class="logo light" href="/">{logo()}</a><p class="legal">{LEGAL}</p><p class="small">{E(C.FOOT_BLURB)}</p><p class="small findnote">{P2C["foot"]} <a href="/visit/">How to find us &rarr;</a></p>
-<p class="small">Orders are checked out on Shopify through namastebookshop.com, which processes payment and ships from New York City.</p></div>
+<p class="small">Orders are checked out on Shopify through <a href="{SHOP}/">Namaste Bookshop</a>, which processes payment and ships from New York City.</p></div>
 <div><h2 class="fh">Shop</h2>{''.join(f'<a href="/shop/{AISLES[k][2]}/">{E(AISLES[k][0])}</a>' for k in AISLE_KEYS)}<a href="/brands/">Brands A&ndash;Z</a></div>
 <div><h2 class="fh">Explore</h2>{expl}<a href="/faq/">FAQ</a></div>
 <div><h2 class="fh">Visit</h2><p class="small foottxt">{STORE_ADDR}</p>{''.join(f'<p class="small foottxt">{d}: {h}</p>' for d, h in HOURS)}<a href="tel:{TEL}">Call {PHONE}</a><a href="{DIRECTIONS}" rel="noopener" target="_blank">Get directions</a><a href="/visit/">Visit &amp; pickup info</a>
@@ -249,11 +250,11 @@ OG_DEFAULT = SITE + '/og.jpg'
 def page(path, title, desc, body, extra_head='', canonical=True, index=True, og_image=None):
     url = SITE + path; ogi = og_image if (og_image and path.startswith('/products/') and og_image.startswith('http')) else OG_DEFAULT; ogcard = ogi == OG_DEFAULT
     ogx = (f'<meta property="og:image:width" content="1200"><meta property="og:image:height" content="630"><meta property="og:image:type" content="image/jpeg">' if ogcard else '') + f'<meta property="og:image:alt" content="{E(BRAND + ': ' + P2C['og_tag'] + '. Inside Namaste Bookshop, 2 W 14th St, NYC') if ogcard else E(title)}"><meta name="twitter:image:alt" content="{E(BRAND) if ogcard else E(title)}">'
-    robots = '<meta name="robots" content="noindex,nofollow">' if PREVIEW else ''
+    robots = '<meta name="robots" content="noindex,nofollow">' if PREVIEW else ('<meta name="robots" content="noindex">' if not index else '')
     gsv = f'<meta name="google-site-verification" content="{E(GSV)}">' if GSV and path == '/' else ''
     doc = f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">{GA_HEAD}
 <title>{E(title)}</title><meta name="description" content="{E(desc)}">{robots}{gsv}{f'<link rel="canonical" href="{url}">' if canonical else ''}
-<meta property="og:site_name" content="{E(BRAND)}"><meta property="og:type" content="website"><meta property="og:title" content="{E(title)}"><meta property="og:description" content="{E(desc)}"><meta property="og:url" content="{url}"><meta property="og:image" content="{E(ogi)}">{ogx}{ogx}
+<meta property="og:site_name" content="{E(BRAND)}"><meta property="og:type" content="website"><meta property="og:title" content="{E(title)}"><meta property="og:description" content="{E(desc)}"><meta property="og:url" content="{url}"><meta property="og:image" content="{E(ogi)}">{ogx}
 <meta name="twitter:card" content="summary_large_image"><meta name="twitter:title" content="{E(title)}"><meta name="twitter:description" content="{E(desc)}"><meta name="twitter:image" content="{E(ogi)}">
 <meta name="theme-color" content="{CFG['theme']['ink']}"><link rel="icon" href="/favicon.svg" type="image/svg+xml"><link rel="icon" href="/icon-192.png" sizes="192x192" type="image/png"><link rel="apple-touch-icon" href="/apple-touch-icon.png"><link rel="manifest" href="/site.webmanifest">
 <link rel="preconnect" href="https://cdn.shopify.com"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="{CFG['theme']['fonts']}" rel="stylesheet">
@@ -400,6 +401,7 @@ compact = [{'h': x['handle'], 't': x['title'], 'c': x['aisle'], 'k': x['base'], 
             'g': 1 if x['gift'] else 0, 'r': round(min(y['rank'] for y in x['group']), 4), 'd': max(y['created'] for y in x['group'])[:10]} for x in leaders]
 json.dump(compact, open(os.path.join(DIST, 'data', 'catalog.json'), 'w'), separators=(',', ':'))
 json.dump({'aisles': {k: {'name': AISLES[k][0], 'slug': AISLES[k][2], 'color': AISLES[k][4]} for k in AISLE_KEYS}, 'fams': {k: FAM_NAME[k] for k in stone_any},
+           'stone_pages': {k: FAM_NAME[k] for k in S.STONE_KEYS},
            'labels': C.LABELS,
            'brands': {k: BR.NAME[k] for k in brand_count}, 'built': datetime.datetime.now().isoformat(timespec='minutes')},
           open(os.path.join(DIST, 'data', 'meta.json'), 'w'))
@@ -617,7 +619,7 @@ policy('/terms/', 'Terms of Service', 'terms-of-service', 'Purchases made throug
 page('/cart/', f'Your cart | {BRAND}', f'Review your {BRAND} cart and check out securely, or choose free pickup at {STORE_ADDR}.',
      f'<section class="wrap prose cartpage"><h1>Your cart</h1><p class="cmsg" role="status" aria-live="polite"></p><div data-cart-page><div class="cbody" data-cart-body><p>Loading your cart&hellip;</p></div></div>'
      f'<noscript><p>The cart needs JavaScript. Call <a href="tel:{TEL}">{PHONE}</a> and we will set your order aside.</p></noscript></section>',
-     '<meta name="robots" content="noindex">', canonical=False, index=False)
+     canonical=False, index=False)
 page('/404.html', f'Page not found | {BRAND}', 'Page not found', f'<section class="wrap prose"><h1>{E(C.NOT_FOUND)}</h1><p>The page you were looking for may have sold out or moved.</p><p><a class="btn" href="/shop/">Back to the shop</a></p></section>', canonical=False, index=False)
 
 # ---- sitemap / robots / CNAME ----

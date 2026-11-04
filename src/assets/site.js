@@ -26,7 +26,7 @@
     hq.addEventListener('focus',()=>catalog(),{once:true});
     hq.oninput=()=>{clearTimeout(t);t=setTimeout(async()=>{const q=hq.value.trim();if(q.length<2){items=[];render();return}
       const [d,m]=await catalog();const ws=words(q);
-      const stn=Object.entries(m.fams).filter(([k,n])=>ws.every(w=>n.toLowerCase().includes(w))).slice(0,1).map(([k,n])=>({t:'Stone: '+n,u:'/stones/'+k+'/'}));
+      const stn=Object.entries(m.stone_pages||{}).filter(([k,n])=>ws.every(w=>n.toLowerCase().includes(w))).slice(0,1).map(([k,n])=>({t:'Stone: '+n,u:'/stones/'+k+'/'}));
       const br=Object.entries(m.brands).filter(([k,n])=>ws.every(w=>n.toLowerCase().includes(w))).slice(0,2).map(([k,n])=>({t:'Brand: '+n,u:'/brands/'+k+'/'}));
       const ps=d.filter(x=>hit(x,m,ws)).sort((a,b)=>a.r-b.r).slice(0,6).map(x=>({t:x.t,u:'/products/'+x.h+'/',img:x.i.replace(/width=\d+/,'width=80'),p:x.p}));
       items=[...stn,...br,...ps,{t:`See all results for “${q}”`,u:'/shop/?q='+encodeURIComponent(q)}];sel=-1;render()},150)};

@@ -23,9 +23,10 @@
   window.NI_CART_URL=checkoutUrl;
   function add(d,q){
     q=q||1;let x=items.find(y=>String(y.v)===String(d.v));
+    const before=x?x.q:0;
     if(x){x.q=Math.min(cap(x),x.q+q);x.out=false}
     else{x={v:String(d.v),h:d.h,t:d.t,vt:d.vt||'',p:+d.p,i:d.i||'',q:1,max:+d.max||0,c:d.c||'',ts:0};x.q=Math.min(cap(x),q);items.push(x)}
-    save();check([x],true);return x;
+    save();check([x],true);return {...x,q:Math.max(0,x.q-before)};
   }
   // live price / stock from the Shopify store (same public endpoint the product pages use)
   const pend={};
@@ -97,15 +98,15 @@ ${pick}${url?`<a class="btn ccheck" href="${esc(url)}" rel="nofollow" data-check
       if(e.shiftKey&&document.activeElement===f[0]){f[f.length-1].focus();e.preventDefault()}else if(!e.shiftKey&&document.activeElement===f[f.length-1]){f[0].focus();e.preventDefault()}}});
   document.addEventListener('click',e=>{
     const t=e.target.closest('[data-atc],[data-atc-items],[data-cart-open],[data-cart-close],[data-inc],[data-dec],[data-rm],[data-checkout]');if(!t)return;
-    if(t.hasAttribute('data-checkout')){const u=checkoutUrl();if(u)t.href=u;try{const l=live();if(l.length)ga('begin_checkout',{currency:'USD',value:Math.round(subtotal()*100)/100,items:l.map(gaItem),transport_type:'beacon'})}catch(_){}return}
+    if(t.hasAttribute('data-checkout')){const u=checkoutUrl();if(u)t.href=u;try{const l=live().map(x=>({...x,q:Math.min(x.q,cap(x))}));if(l.length)ga('begin_checkout',{currency:'USD',value:Math.round(l.reduce((sum,x)=>sum+x.p*x.q,0)*100)/100,items:l.map(gaItem),transport_type:'beacon'})}catch(_){}return}
     if(t.hasAttribute('data-cart-open')){e.preventDefault();open();return}
     if(t.hasAttribute('data-cart-close')){if(drawer&&!drawer.hidden){e.preventDefault();close()}return}
     if(t.hasAttribute('data-atc')||t.hasAttribute('data-atc-items')){e.preventDefault();if(t.disabled||t.getAttribute('aria-disabled')==='true')return;
       let list;try{list=t.hasAttribute('data-atc-items')?JSON.parse(t.getAttribute('data-atc-items')):[t.dataset]}catch(_){return}
-      list.forEach(d=>add(d,+(d.q||1)));
-      try{const gi=list.map(d=>gaItem({v:d.v,t:d.t,vt:d.vt,p:d.p,q:+(d.q||1),c:d.c}));ga('add_to_cart',{currency:'USD',value:Math.round(gi.reduce((s,x)=>s+x.price*x.quantity,0)*100)/100,items:gi})}catch(_){}
-      const lab=t.textContent;t.classList.add('added');t.textContent='Added ✓';setTimeout(()=>{t.textContent=lab;t.classList.remove('added')},1600);
-      open(list.length>1?`Added ${list.length} items to your cart.`:`Added ${list[0].t} to your cart.`);return}
+      const added=list.map(d=>add(d,+(d.q||1))).filter(x=>x.q>0);
+      try{if(added.length){const gi=added.map(gaItem);ga('add_to_cart',{currency:'USD',value:Math.round(gi.reduce((s,x)=>s+x.price*x.quantity,0)*100)/100,items:gi})}}catch(_){}
+      const lab=t.textContent;t.classList.add('added');t.textContent=added.length?'Added ✓':'Limit reached';setTimeout(()=>{t.textContent=lab;t.classList.remove('added')},1600);
+      open(!added.length?'The selected items are already at their quantity limit.':added.length>1?`Added ${added.length} items to your cart.`:`Added ${added[0].t} to your cart.`);return}
     const row=t.closest('[data-v]');const x=row&&items.find(y=>String(y.v)===row.dataset.v);if(!x)return;
     if(t.hasAttribute('data-rm')){items=items.filter(y=>y!==x);say(`Removed ${x.t}.`)}
     else if(t.hasAttribute('data-inc'))x.q=Math.min(cap(x),x.q+1);
