@@ -66,7 +66,7 @@
     if(sel)sel.onchange=e=>setV(e.target.value);
     fetch(`${P.shop}/products/${P.handle}.js`).then(r=>r.ok?r.json():Promise.reject(r.status)).then(p=>{variants=p.variants;
       if(sel)[...sel.options].forEach(o=>{const v=variants.find(v=>String(v.id)===o.value);if(v)o.disabled=!v.available});
-      setV(sel?sel.value:(variants.find(v=>v.available)||variants[0]).id)}).catch(()=>{stock.querySelector('span').textContent='In stock (checked at checkout)'});
+      setV(sel?sel.value:(variants.find(v=>v.available)||variants[0]).id)}).catch(()=>{stock.querySelector('span').textContent='Availability checked at checkout'});
     $$('.th').forEach(b=>b.onclick=()=>{const m=$('#mainimg');m.removeAttribute('srcset');m.src=b.dataset.src;$$('.th').forEach(x=>x.classList.remove('on'));b.classList.add('on')});
   }
   // quiz: combine the chosen answers' filters and recommend real in-stock products
